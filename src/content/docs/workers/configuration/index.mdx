@@ -1,14 +1,93 @@
----
-pcx_content_type: navigation
-title: Configuration
-sidebar:
-  order: 8
-  group:
-    hideIndex: true
----
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url)
 
-import { DirectoryListing } from "~/components";
+    // ========= PAY WITH STRIPE =========
+    if (url.pathname === "/api/pay" && request.method === "POST") {
+      const { email } = await request.json()
 
-Configure your Worker project with various features and customizations.
+      const body = new URLSearchParams({
+        mode: "subscription",
+        "line_items[0][price]": "YOUR_STRIPE_PRICE_ID",
+        "line_items[0][quantity]": 1,
+        success_url: "https://g-localranker.com/dashboard.html",
+        cancel_url: "https://g-localranker.com",
+        customer_email: email
+      })
 
-<DirectoryListing />
+      const stripe = await fetch(
+        "https://api.stripe.com/v1/checkout/sessions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.STRIPE_SECRET}`,
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body
+        }
+      )
+
+      const data = await stripe.json()
+      return Response.json({ url: data.url })
+    }
+
+    // ========= RUN SEO AUDIT =========
+    if (url.pathname === "/api/audit" && request.method === "POST") {
+      const { email, website } = await request.json()
+
+      const user = await env.DB.prepare(
+        "SELECT * FROM users WHERE email=?"
+      ).bind(email).first()
+
+      if (!user || user.subscription_status !== "active") {
+        return Response.json({ error: "You must pay first." }, { status: 403 })
+      }
+
+      // Call Google PageSpeed
+      const ps = await fetch(
+        `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${website}&key=${env.PAGESPEED_KEY}`
+      )
+
+      const result = await ps.json()
+
+      const performance =
+        result.lighthouseResult.categories.performance.score * 100
+
+      const seo =
+        result.lighthouseResult.categories.seo.score * 100
+
+      // AI Suggestions
+      const ai = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "user", content: `Give SEO tips for ${website}` }
+          ]
+        })
+      })
+
+      const aiData = await ai.json()
+      const suggestions = aiData.choices[0].message.content
+
+      await env.DB.prepare(
+        "INSERT INTO reports (email, website, performance, seo, ai_suggestions) VALUES (?, ?, ?, ?, ?)"
+      )
+        .bind(email, website, performance, seo, suggestions)
+        .run()
+
+      return Response.json({
+        performance,
+        seo,
+        suggestions
+      })
+    }
+
+    return new Response("Not Found", { status: 404 })
+  }
+}
+
